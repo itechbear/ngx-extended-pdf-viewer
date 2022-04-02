@@ -134,7 +134,7 @@ class WorkerMessageHandler {
     const WorkerTasks = [];
     const verbosity = (0, _util.getVerbosityLevel)();
     const apiVersion = docParams.apiVersion;
-    const workerVersion = '2.14.363';
+    const workerVersion = '2.14.393';
 
     if (apiVersion !== workerVersion) {
       throw new Error(`The API version "${apiVersion}" does not match ` + `the Worker version "${workerVersion}".`);
@@ -18160,6 +18160,8 @@ var _writer = __w_pdfjs_require__(71);
 
 var _factory = __w_pdfjs_require__(74);
 
+const LINE_FACTOR = 1.35;
+
 class AnnotationFactory {
   static create(xref, ref, pdfManager, idFactory, collectFields) {
     return Promise.all([pdfManager.ensureCatalog("acroForm"), collectFields ? this._getPageIndex(xref, ref, pdfManager) : -1]).then(([acroForm, pageIndex]) => pdfManager.ensure(this, "_create", [xref, ref, pdfManager, idFactory, acroForm, collectFields, pageIndex]));
@@ -19153,6 +19155,10 @@ class WidgetAnnotation extends Annotation {
       return null;
     }
 
+    if (Array.isArray(value) && Array.isArray(this.data.fieldValue) && value.length === this.data.fieldValue.length && value.every((x, i) => x === this.data.fieldValue[i])) {
+      return null;
+    }
+
     let appearance = await this._getAppearance(evaluator, task, annotationStorage);
 
     if (appearance === null) {
@@ -19186,7 +19192,9 @@ class WidgetAnnotation extends Annotation {
       appearance = newTransform.encryptString(appearance);
     }
 
-    dict.set("V", (0, _util.isAscii)(value) ? value : (0, _util.stringToUTF16BEString)(value));
+    const encoder = val => (0, _util.isAscii)(val) ? val : (0, _util.stringToUTF16BEString)(val);
+
+    dict.set("V", Array.isArray(value) ? value.map(encoder) : encoder(value));
     dict.set("AP", AP);
     dict.set("M", `D:${(0, _util.getModificationDate)()}`);
     const appearanceDict = new _primitives.Dict(xref);
@@ -19308,8 +19316,6 @@ class WidgetAnnotation extends Annotation {
     if (!fontSize) {
       const roundWithTwoDigits = x => Math.floor(x * 100) / 100;
 
-      const LINE_FACTOR = 1.35;
-
       if (lineCount === -1) {
         const textWidth = this._getTextWidth(text, font);
 
@@ -19378,12 +19384,13 @@ class WidgetAnnotation extends Annotation {
   }
 
   _renderText(text, font, fontSize, totalWidth, alignment, hPadding, vPadding) {
-    const width = this._getTextWidth(text, font) * fontSize;
     let shift;
 
     if (alignment === 1) {
+      const width = this._getTextWidth(text, font) * fontSize;
       shift = (totalWidth - width) / 2;
     } else if (alignment === 2) {
+      const width = this._getTextWidth(text, font) * fontSize;
       shift = totalWidth - width - hPadding;
     } else {
       shift = hPadding;
@@ -20054,6 +20061,115 @@ class ChoiceWidgetAnnotation extends WidgetAnnotation {
       fillColor: this.data.backgroundColor,
       type
     };
+  }
+
+  async _getAppearance(evaluator, task, annotationStorage) {
+    if (this.data.combo) {
+      return super._getAppearance(evaluator, task, annotationStorage);
+    }
+
+    if (!annotationStorage) {
+      return null;
+    }
+
+    const storageEntry = annotationStorage.get(this.data.id);
+    let exportedValue = storageEntry && storageEntry.value;
+
+    if (exportedValue === undefined) {
+      return null;
+    }
+
+    if (!Array.isArray(exportedValue)) {
+      exportedValue = [exportedValue];
+    }
+
+    const defaultPadding = 2;
+    const hPadding = defaultPadding;
+    const totalHeight = this.data.rect[3] - this.data.rect[1];
+    const totalWidth = this.data.rect[2] - this.data.rect[0];
+    const lineCount = this.data.options.length;
+    const valueIndices = [];
+
+    for (let i = 0; i < lineCount; i++) {
+      const {
+        exportValue
+      } = this.data.options[i];
+
+      if (exportedValue.includes(exportValue)) {
+        valueIndices.push(i);
+      }
+    }
+
+    if (!this._defaultAppearance) {
+      this.data.defaultAppearanceData = (0, _default_appearance.parseDefaultAppearance)(this._defaultAppearance = "/Helvetica 0 Tf 0 g");
+    }
+
+    const font = await this._getFontData(evaluator, task);
+    let defaultAppearance;
+    let {
+      fontSize
+    } = this.data.defaultAppearanceData;
+
+    if (!fontSize) {
+      const lineHeight = (totalHeight - defaultPadding) / lineCount;
+      let lineWidth = -1;
+      let value;
+
+      for (const {
+        displayValue
+      } of this.data.options) {
+        const width = this._getTextWidth(displayValue);
+
+        if (width > lineWidth) {
+          lineWidth = width;
+          value = displayValue;
+        }
+      }
+
+      [defaultAppearance, fontSize] = this._computeFontSize(lineHeight, totalWidth - 2 * hPadding, value, font, -1);
+    } else {
+      defaultAppearance = this._defaultAppearance;
+    }
+
+    const lineHeight = fontSize * LINE_FACTOR;
+    const vPadding = (lineHeight - fontSize) / 2;
+    const numberOfVisibleLines = Math.floor(totalHeight / lineHeight);
+    let firstIndex;
+
+    if (valueIndices.length === 1) {
+      const valuePosition = valueIndices[0];
+      const indexInPage = valuePosition % numberOfVisibleLines;
+      firstIndex = valuePosition - indexInPage;
+    } else {
+      firstIndex = valueIndices.length ? valueIndices[0] : 0;
+    }
+
+    const end = Math.min(firstIndex + numberOfVisibleLines + 1, lineCount);
+    const buf = ["/Tx BMC q", `1 1 ${totalWidth} ${totalHeight} re W n`];
+
+    if (valueIndices.length) {
+      buf.push("0.600006 0.756866 0.854904 rg");
+
+      for (const index of valueIndices) {
+        if (firstIndex <= index && index < end) {
+          buf.push(`1 ${totalHeight - (index - firstIndex + 1) * lineHeight} ${totalWidth} ${lineHeight} re f`);
+        }
+      }
+    }
+
+    buf.push("BT", defaultAppearance, `1 0 0 1 0 ${totalHeight} Tm`);
+
+    for (let i = firstIndex; i < end; i++) {
+      const {
+        displayValue
+      } = this.data.options[i];
+      const hpadding = i === firstIndex ? hPadding : 0;
+      const vpadding = i === firstIndex ? vPadding : 0;
+      buf.push(this._renderText(displayValue, font, fontSize, totalWidth, 0, hpadding, -lineHeight + vpadding));
+    }
+
+    buf.push("ET Q EMC");
+    return buf.join("\n");
   }
 
 }
@@ -23760,11 +23876,29 @@ class PartialEvaluator {
       spaceInFlowMax: 0,
       trackingSpaceMin: Infinity,
       negativeSpaceMax: -Infinity,
+      notASpace: -Infinity,
       transform: null,
       fontName: null,
       hasEOL: false
     };
+    const twoLastChars = [" ", " "];
+    let twoLastCharsPos = 0;
+
+    function saveLastChar(char) {
+      const nextPos = (twoLastCharsPos + 1) % 2;
+      const ret = twoLastChars[twoLastCharsPos] !== " " && twoLastChars[nextPos] === " ";
+      twoLastChars[twoLastCharsPos] = char;
+      twoLastCharsPos = nextPos;
+      return ret;
+    }
+
+    function resetLastChars() {
+      twoLastChars[0] = twoLastChars[1] = " ";
+      twoLastCharsPos = 0;
+    }
+
     const TRACKING_SPACE_FACTOR = 0.1;
+    const NOT_A_SPACE_FACTOR = 0.03;
     const NEGATIVE_SPACE_FACTOR = -0.2;
     const SPACE_IN_FLOW_MIN_FACTOR = 0.1;
     const SPACE_IN_FLOW_MAX_FACTOR = 0.6;
@@ -23827,6 +23961,7 @@ class PartialEvaluator {
       const scaleCtmX = Math.hypot(textState.ctm[0], textState.ctm[1]);
       textContentItem.textAdvanceScale = scaleCtmX * scaleLineX;
       textContentItem.trackingSpaceMin = textState.fontSize * TRACKING_SPACE_FACTOR;
+      textContentItem.notASpace = textState.fontSize * NOT_A_SPACE_FACTOR;
       textContentItem.negativeSpaceMax = textState.fontSize * NEGATIVE_SPACE_FACTOR;
       textContentItem.spaceInFlowMin = textState.fontSize * SPACE_IN_FLOW_MIN_FACTOR;
       textContentItem.spaceInFlowMax = textState.fontSize * SPACE_IN_FLOW_MAX_FACTOR;
@@ -23957,6 +24092,7 @@ class PartialEvaluator {
             return true;
           }
 
+          resetLastChars();
           flushTextContentItem();
           return true;
         }
@@ -23966,10 +24102,15 @@ class PartialEvaluator {
           return true;
         }
 
+        if (advanceY <= textOrientation * textContentItem.notASpace) {
+          resetLastChars();
+        }
+
         if (advanceY <= textOrientation * textContentItem.trackingSpaceMin) {
           textContentItem.height += advanceY;
         } else if (!addFakeSpaces(advanceY, textContentItem.prevTransform, textOrientation)) {
           if (textContentItem.str.length === 0) {
+            resetLastChars();
             textContent.items.push({
               str: " ",
               dir: "ltr",
@@ -23997,6 +24138,7 @@ class PartialEvaluator {
           return true;
         }
 
+        resetLastChars();
         flushTextContentItem();
         return true;
       }
@@ -24006,10 +24148,15 @@ class PartialEvaluator {
         return true;
       }
 
+      if (advanceX <= textOrientation * textContentItem.notASpace) {
+        resetLastChars();
+      }
+
       if (advanceX <= textOrientation * textContentItem.trackingSpaceMin) {
         textContentItem.width += advanceX;
       } else if (!addFakeSpaces(advanceX, textContentItem.prevTransform, textOrientation)) {
         if (textContentItem.str.length === 0) {
+          resetLastChars();
           textContent.items.push({
             str: " ",
             dir: "ltr",
@@ -24066,7 +24213,7 @@ class PartialEvaluator {
 
         let scaledDim = glyphWidth * scale;
 
-        if (glyph.isWhitespace && (i === 0 || i + 1 === ii || glyphs[i - 1].isWhitespace || glyphs[i + 1].isWhitespace || extraSpacing)) {
+        if (glyph.isWhitespace) {
           if (!font.vertical) {
             charSpacing += scaledDim + textState.wordSpacing;
             textState.translateTextMatrix(charSpacing * textState.textHScale, 0);
@@ -24075,6 +24222,7 @@ class PartialEvaluator {
             textState.translateTextMatrix(0, -charSpacing);
           }
 
+          saveLastChar(" ");
           continue;
         }
 
@@ -24102,14 +24250,15 @@ class PartialEvaluator {
           textChunk.prevTransform = getCurrentTextTransform();
         }
 
-        if (glyph.isWhitespace) {
+        let glyphUnicode = glyph.unicode;
+        glyphUnicode = NormalizedUnicodes[glyphUnicode] || glyphUnicode;
+        glyphUnicode = (0, _unicode.reverseIfRtl)(glyphUnicode);
+
+        if (saveLastChar(glyphUnicode)) {
           textChunk.str.push(" ");
-        } else {
-          let glyphUnicode = glyph.unicode;
-          glyphUnicode = NormalizedUnicodes[glyphUnicode] || glyphUnicode;
-          glyphUnicode = (0, _unicode.reverseIfRtl)(glyphUnicode);
-          textChunk.str.push(glyphUnicode);
         }
+
+        textChunk.str.push(glyphUnicode);
 
         if (charSpacing) {
           if (!font.vertical) {
@@ -24122,6 +24271,8 @@ class PartialEvaluator {
     }
 
     function appendEOL() {
+      resetLastChars();
+
       if (textContentItem.initialized) {
         textContentItem.hasEOL = true;
         flushTextContentItem();
@@ -24141,6 +24292,7 @@ class PartialEvaluator {
     function addFakeSpaces(width, transf, textOrientation) {
       if (textOrientation * textContentItem.spaceInFlowMin <= width && width <= textOrientation * textContentItem.spaceInFlowMax) {
         if (textContentItem.initialized) {
+          resetLastChars();
           textContentItem.str.push(" ");
         }
 
@@ -24156,6 +24308,7 @@ class PartialEvaluator {
       }
 
       flushTextContentItem();
+      resetLastChars();
       textContent.items.push({
         str: " ",
         dir: "ltr",
@@ -53972,13 +54125,7 @@ class Catalog {
           const baseCharCode = style === "a" ? A_LOWER_CASE : A_UPPER_CASE;
           const letterIndex = currentIndex - 1;
           const character = String.fromCharCode(baseCharCode + letterIndex % LIMIT);
-          const charBuf = [];
-
-          for (let j = 0, jj = letterIndex / LIMIT | 0; j <= jj; j++) {
-            charBuf.push(character);
-          }
-
-          currentLabel = charBuf.join("");
+          currentLabel = character.repeat(Math.floor(letterIndex / LIMIT) + 1);
           break;
 
         default:
@@ -56542,7 +56689,11 @@ function writeXFADataForAcroform(str, newRefs) {
     const node = xml.documentElement.searchNode((0, _core_utils.parseXFAPath)(path), 0);
 
     if (node) {
-      node.childNodes = [new _xml_parser.SimpleDOMNode("#text", value)];
+      if (Array.isArray(value)) {
+        node.childNodes = value.map(val => new _xml_parser.SimpleDOMNode("value", val));
+      } else {
+        node.childNodes = [new _xml_parser.SimpleDOMNode("#text", value)];
+      }
     } else {
       (0, _util.warn)(`Node not found for path: ${path}`);
     }
@@ -73850,8 +74001,8 @@ Object.defineProperty(exports, "WorkerMessageHandler", ({
 
 var _worker = __w_pdfjs_require__(1);
 
-const pdfjsVersion = '2.14.363';
-const pdfjsBuild = '09b645823';
+const pdfjsVersion = '2.14.393';
+const pdfjsBuild = '9ada511a0';
 })();
 
 /******/ 	return __webpack_exports__;
